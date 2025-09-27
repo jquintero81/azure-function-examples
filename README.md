@@ -162,3 +162,122 @@ Make sure to run `func start` from the correct directory:
   ```
 
 ⚠️ **Warning**: If you run `func start` from the root directory, it may fail to find the compiled classes.
+
+---
+
+## Custom B2C Policy Initiates the Login Flow
+
+- From the policy (in an `OrchestrationStep`), call the `StartLoginOrchestration` Function via REST.
+- This starts the Durable Orchestration (`LoginWithMfaOrchestrator`) and returns an `instanceId`.
+- Store this `instanceId` as a temporary claim within the policy for later use.
+- B2C displays the OTP input screen to the user.
+- The user enters the code they received (via email, SMS, push notification, etc.).
+- In the next step of the same Custom Policy, a REST call is made to the `RaiseMfaCodeEvent` Function.
+- The `instanceId` and the code entered by the user are passed in this call.
+- This step is not performed directly by the user; B2C executes it as part of the policy flow.
+- The orchestrator (`LoginWithMfaOrchestrator`), which was waiting with `ctx.waitForExternalEvent("MfaCode")`, receives the event and continues the flow.
+
+---
+
+## Example of a Custom Policy (XML Fragment) for MFA flow
+
+### 1. Claims We Need
+
+```xml
+<ClaimsSchema>
+  <!-- Claim to store the instanceId of the Durable Function -->
+  <ClaimType Id="durableInstanceId">
+    <DisplayName>Durable Orchestration Instance ID</DisplayName>
+    <DataType>string</DataType>
+  </ClaimType>
+
+  <!-- Claim for the OTP code entered by the user -->
+  <ClaimType Id="mfaCode">
+    <DisplayName>MFA Code</DisplayName>
+    <DataType>string</DataType>
+    <UserHelpText>Enter the verification code you received.</UserHelpText>
+  </ClaimType>
+</ClaimsSchema>
+```
+
+---
+
+### 2. REST Technical Profile to Send the Code to the Function
+
+```xml
+<TechnicalProfile Id="REST-RaiseMfaCodeEvent">
+  <DisplayName>Raise MFA Code Event</DisplayName>
+  <Protocol Name="Proprietary" Handler="Web.TPEngine.Providers.RestfulProvider" />
+  <Metadata>
+    <Item Key="ServiceUrl">https://<YOUR_FUNCTION_APP>.azurewebsites.net/api/RaiseMfaCodeEvent</Item>
+    <Item Key="AuthenticationType">None</Item>
+    <Item Key="SendClaimsIn">Body</Item>
+    <Item Key="HttpBinding">POST</Item>
+  </Metadata>
+  <InputClaims>
+    <InputClaim ClaimTypeReferenceId="durableInstanceId" PartnerClaimType="instanceId" />
+    <InputClaim ClaimTypeReferenceId="mfaCode" PartnerClaimType="code" />
+  </InputClaims>
+  <OutputClaims>
+    <!-- You can capture the response here if needed -->
+  </OutputClaims>
+</TechnicalProfile>
+```
+
+---
+
+### 3. Screen to Capture the OTP
+
+```xml
+<OrchestrationStep Order="2" Type="ClaimsExchange">
+  <Preconditions>
+    <Precondition Type="ClaimEquals" ExecuteActionsIf="false">
+      <Value>isActiveMFASession</Value>
+      <Value>true</Value>
+      <Action>SkipThisOrchestrationStep</Action>
+    </Precondition>
+  </Preconditions>
+  <ClaimsExchanges>
+    <ClaimsExchange Id="SelfAsserted-MfaCode" TechnicalProfileReferenceId="SelfAsserted-MfaCodeInput" />
+  </ClaimsExchanges>
+</OrchestrationStep>
+```
+
+Where `SelfAsserted-MfaCodeInput` is a SelfAsserted Technical Profile that displays a textbox for the user to enter the OTP:
+
+```xml
+<TechnicalProfile Id="SelfAsserted-MfaCodeInput">
+  <DisplayName>Enter MFA Code</DisplayName>
+  <Protocol Name="Proprietary" Handler="Web.TPEngine.Providers.SelfAssertedAttributeProvider" />
+  <Metadata>
+    <Item Key="ContentDefinitionReferenceId">api.selfasserted</Item>
+  </Metadata>
+  <InputClaims>
+    <InputClaim ClaimTypeReferenceId="mfaCode" />
+  </InputClaims>
+  <OutputClaims>
+    <OutputClaim ClaimTypeReferenceId="mfaCode" Required="true" />
+  </OutputClaims>
+</TechnicalProfile>
+```
+
+---
+
+### 4. OrchestrationStep to Send the Code to the Function
+
+```xml
+<OrchestrationStep Order="3" Type="ClaimsExchange">
+  <ClaimsExchanges>
+    <ClaimsExchange Id="RaiseMfaCodeEvent" TechnicalProfileReferenceId="REST-RaiseMfaCodeEvent" />
+  </ClaimsExchanges>
+</OrchestrationStep>
+```
+
+---
+
+### 🔑 Complete Flow:
+
+1. In step 1 (not shown here), the Durable Function is started, and the `durableInstanceId` is stored in a claim.
+2. In step 2, the user is presented with the screen to enter the `mfaCode`.
+3. In step 3, the policy calls the `REST-RaiseMfaCodeEvent` Technical Profile, sending `{ "instanceId": "...", "code": "..." }` to your Function.
+4. The Durable Functions orchestrator receives the event and continues the flow.
